@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# Build and test on a build machine instead of this one.
+#
+#   scripts/remote <cargo args...>     e.g.  scripts/remote test --locked legacy
+#   scripts/remote --ci                run scripts/ci.sh there (the whole test suite, as CI does)
+#   scripts/remote --sh '<command>'    run a shell command in the remote copy
+#
+# Copies this checkout (the worktree you are in, with vendor/ghostty) to
+# $LBC_BUILD_HOST:$LBC_BUILD_DIR and runs there, niced, with at most $JOBS jobs. The remote target
+# folder is kept between runs. A Linux host that has libxkbcommon-x11 but not its -dev package
+# links through a shim in target/linkshim.
+#
+#   LBC_BUILD_HOST   an ssh host that has Rust, Zig 0.16 and the build packages (required; no default)
+#   LBC_BUILD_DIR    folder on that host, relative to its home (default build/lumbridge-app-<branch>)
+#   JOBS             default 4
+set -euo pipefail
+host=${LBC_BUILD_HOST:?set LBC_BUILD_HOST to the ssh name of a build machine}
+jobs=${JOBS:-4}
+root=$(git rev-parse --show-toplevel)
+branch=$(git -C "$root" rev-parse --abbrev-ref HEAD | tr -c 'A-Za-z0-9._\n-' '-')
+dest=${LBC_BUILD_DIR:-build/lumbridge-app-$branch}
+[ -e "$root/vendor/ghostty/build.zig" ] || { echo "vendor/ghostty is empty: git submodule update --init --depth 1" >&2; exit 1; }
+ssh -o BatchMode=yes "$host" "mkdir -p ~/$dest" </dev/null
+rsync -a --delete --exclude /target --exclude .git --exclude /vendor/ghostty/.zig-cache --exclude /vendor/ghostty/zig-out "$root/" "$host:$dest/"
+shim='mkdir -p target/linkshim; x=/usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so; if [ ! -e $x ] && [ -e $x.0 ]; then ln -sfn $x.0 target/linkshim/libxkbcommon-x11.so; fi;'
+pre='export PATH=$HOME/.local/bin:$HOME/.cargo/bin:$PATH CARGO_BUILD_JOBS='"$jobs"' CARGO_TERM_COLOR=never LIBRARY_PATH=$PWD/target/linkshim${LIBRARY_PATH:+:$LIBRARY_PATH};'
+case "${1:-}" in
+  --ci) cmd="RUST_TEST_THREADS=$jobs setsid -w nice -n 15 scripts/ci.sh" ;;
+  --sh) shift; cmd="$*" ;;
+  "") echo "usage: scripts/remote <cargo args...> | --ci | --sh '<command>'" >&2; exit 2 ;;
+  *) cmd="setsid -w nice -n 15 cargo $(printf '%q ' "$@")" ;;
+esac
+ssh -o BatchMode=yes "$host" "cd ~/$dest && $shim $pre $cmd" </dev/null

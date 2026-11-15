@@ -1,0 +1,69 @@
+#!/bin/bash
+# Updates Lumbridge to the tip of `main` and reinstalls it. There is no self-updater (builds are
+# from source), so this is the update button.
+#
+#   lumbridge-app-update            fetch, build a release and install it (macOS: ~/Applications/Lumbridge.app,
+#                                   Linux: ~/.local/share/lumbridge-app)
+#   lumbridge-app-update --ref X    build branch/commit X instead of main (a pull request branch, to try it)
+#
+# Settings (environment):
+#   LUMBRIDGE_APP_SRC        the checkout to build in (default: the one this script is in)
+#   LUMBRIDGE_APP_JOBS       parallel build jobs (default 4; the build runs at low priority)
+#   LUMBRIDGE_APP_BUILDER    Linux only: an ssh host to build on instead of this machine (no default).
+#                            It needs Rust, Zig and the build packages from the README.
+#   LUMBRIDGE_APP_BUILD_DIR  the checkout on that host, relative to its home (default build/lumbridge-app);
+#                            cloned from LUMBRIDGE_APP_REMOTE (default: this checkout's origin) when missing
+# The running app keeps going; quit and reopen it to use the new build.
+set -euo pipefail
+ref=main
+[[ ${1:-} == --ref ]] && ref=${2:?--ref needs a branch or commit}
+here=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+src=${LUMBRIDGE_APP_SRC:-$here}
+jobs=${LUMBRIDGE_APP_JOBS:-4}
+say() { printf '\033[1m%s\033[0m\n' "$*"; }
+
+checkout() {   # in the current repo: fetch and check out $ref, with its submodule
+  git fetch -q origin
+  if git show-ref -q --verify "refs/remotes/origin/$ref"; then git checkout -q -B "$ref" "origin/$ref"; else git checkout -q "$ref"; fi
+  git submodule update --init --depth 1 -q
+  git log --oneline -1
+}
+
+# Linux machines with libxkbcommon-x11 but without its -dev package link through a shim.
+build() {   # in the current repo
+  mkdir -p target/linkshim
+  if [[ $(uname -s) == Linux && ! -e /usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so && -e /usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so.0 ]]; then
+    ln -sfn /usr/lib/x86_64-linux-gnu/libxkbcommon-x11.so.0 target/linkshim/libxkbcommon-x11.so
+  fi
+  LIBRARY_PATH=$PWD/target/linkshim${LIBRARY_PATH:+:$LIBRARY_PATH} nice -n 15 cargo build --release --locked -j "$jobs"
+}
+
+export PATH=$HOME/.cargo/bin:$HOME/.local/bin:$PATH
+if [[ $(uname -s) == Linux && -n ${LUMBRIDGE_APP_BUILDER:-} ]]; then
+  builder=$LUMBRIDGE_APP_BUILDER
+  dir=${LUMBRIDGE_APP_BUILD_DIR:-build/lumbridge-app}
+  remote=${LUMBRIDGE_APP_REMOTE:-$(git -C "$src" remote get-url origin)}
+  say "building $ref on $builder…"
+  rev=$(ssh "$builder" "set -e; export PATH=\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH; [[ -d ~/$dir ]] || git clone -q -b main '$remote' ~/$dir; cd ~/$dir
+    $(declare -f checkout build); ref=$ref; jobs=$jobs; checkout >/dev/null
+    build >/tmp/lumbridge-app-update.log 2>&1 || { tail -20 /tmp/lumbridge-app-update.log >&2; exit 1; }
+    git log --oneline -1" </dev/null)
+  say "Lumbridge: $rev"
+  tmp=$(mktemp -d)
+  scp -q "$builder:$dir/target/release/lumbridge-app" "$tmp/lumbridge-app"
+  (cd "$src" && checkout >/dev/null 2>&1 || true)
+  bash "$src/scripts/lumbridge-app-install-linux" "$tmp/lumbridge-app" | tail -1
+  rm -rf "$tmp"
+else
+  cd "$src"
+  say "Lumbridge: $(checkout)"
+  say "building (nice, -j $jobs)…"
+  build 2>&1 | grep -E "^(error|warning: unused)|Finished" || true
+  [[ -x target/release/lumbridge-app ]] || { echo "build failed" >&2; exit 1; }
+  if [[ $(uname -s) == Darwin ]]; then
+    bash scripts/lumbridge-app-install-macos | tail -1
+  else
+    bash scripts/lumbridge-app-install-linux | tail -1
+  fi
+fi
+say "now: $("$HOME/.local/bin/lumbridge-app" --version). Quit and reopen Lumbridge to use it."

@@ -1,0 +1,2 @@
+#!/bin/sh
+echo 'lbc 0.1.1'

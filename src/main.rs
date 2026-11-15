@@ -1,0 +1,216 @@
+// Windows: a window app, but tests inherit Cargo's console for their child processes.
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
+mod bench;
+mod commands;
+mod control;
+mod core_bin;
+mod diagrams;
+mod files;
+mod keys;
+mod layout;
+mod layout_sync;
+mod lbc;
+mod links;
+mod lumbridge;
+mod model;
+mod mirror;
+mod mirror_sync;
+mod place;
+mod persist;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+mod macos_check;
+mod mods;
+mod mod_files;
+mod process_cwd;
+mod programs;
+mod remote_shell;
+mod settings;
+mod setup;
+mod sound;
+mod spawn;
+mod sprites;
+mod terminal;
+mod versions;
+mod vt;
+mod win32_keys;
+mod window;
+
+use gpui::*;
+
+const HELP: &str = "\
+lumbridge-app: the Lumbridge desktop app. With no arguments it opens the window.
+
+Usage:
+  lumbridge-app                        open the window
+  lumbridge-app ls                     spaces, their tabs and terminals, in the open window
+  lumbridge-app do <command> [args]    run a command: --name api --argv '[\"pi\"]', or one JSON object
+  lumbridge-app commands               every command, its arguments, what it does
+  lumbridge-app status                 what the window shows, and any errors
+  lumbridge-app shot [file.png]        save the last window frame (default: lumbridge-shot.png)
+  lumbridge-app check <mod folder>     load a mod once and report what's wrong
+  lumbridge-app --skill                Agent Skill: driving the window, and where lbc fits
+  lumbridge-app --version
+
+The terminals run in lumbridge-core (`lbc`), which keeps them alive when the
+window closes. `lbc --help`: start, read, wait on and talk to terminals and
+agents. The app shows them and arranges them in spaces and tabs.
+
+Home: ~/.config/lumbridge-app (LUMBRIDGE_APP_HOME picks another).
+";
+
+/// A Windows window app has no console: answers to `lumbridge-app ls` and the
+/// like go to the terminal it was started from. Output already piped (agents,
+/// scripts) keeps its pipes.
+#[cfg(windows)]
+fn attach_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_OUTPUT_HANDLE};
+    // Attaching would point the output at the console instead of the pipe or file.
+    let out = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
+    if out.is_null() || out == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+        unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+    }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    #[cfg(target_os = "macos")]
+    macos_check::startup(&args);
+    #[cfg(windows)]
+    if args.len() > 1 {
+        attach_console();
+    }
+    // `lumbridge-app check <mod>` / `lumbridge-app types <mod>`: gpui-shell's own checker, with Lumbridge's module installed.
+    if matches!(args.get(1).map(String::as_str), Some("check" | "types")) {
+        mods::install_check_policy();
+        gpui_shell::host::main_with_components(gpui_shell::FrozenComponentRegistry::default());
+        return;
+    }
+    if matches!(args.get(1).map(String::as_str), Some("do" | "status" | "ls" | "commands" | "shot")) {
+        std::process::exit(control::client(&args[1..]));
+    }
+    // Anything else from a shell answers in the shell; only a bare launch opens the window.
+    match args.get(1).map(String::as_str) {
+        // Already open on this home: that window comes to the front.
+        None if control::raise_running() => return,
+        None => {}
+        Some("-h" | "--help" | "help") => return print!("{HELP}"),
+        Some("--skill") => return print!("{}", include_str!("SKILL.md")),
+        Some("-V" | "--version" | "version") => return println!("lumbridge-app {}", env!("CARGO_PKG_VERSION")),
+        Some(other) => {
+            eprint!("lumbridge-app: unknown argument {other:?}\n\n{HELP}");
+            std::process::exit(2);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    core_bin::fill_path();
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_env("LUMBRIDGE_APP_LOG")
+                .unwrap_or_else(|_| "warn,lumbridge_app=info,gpui_shell=info".into()),
+        )
+        .init();
+
+    // A first start sizes the app to the screen and the system's text size.
+    let fresh = !settings::path().exists();
+    // The core people installed; without one, the setup screen says how to get it.
+    let person = settings::load_person();
+    let configured = person.as_ref().ok().and_then(|p| p.core.clone());
+    let core: Result<std::sync::Arc<lbc::Core>, setup::Need> = match core_bin::find(configured.as_deref()) {
+        None => Err(setup::Need::Install),
+        Some(bin) => {
+            core_bin::use_core(bin);
+            match lbc::Core::connect() {
+                // One that can't serve this app gets the screen that fixes it.
+                Ok(core) => lbc::check(&core.hello).map(|()| core).map_err(setup::Need::Fix),
+                Err(e) => {
+                    eprintln!("lumbridge-app: {e:#}");
+                    Err(setup::Need::connection(e))
+                }
+            }
+        }
+    };
+    #[cfg(target_os = "macos")]
+    core_bin::install_cli_link();
+    bench::start();
+    if let Err(e) = mods::write_workspace() {
+        eprintln!("lumbridge-app: cannot write {}: {e}", mods::app_dir().display());
+    }
+
+    gpui_platform::application()
+        // Mods run programs already; the user's own links (dotfiles, Nix) may point out.
+        .with_assets(gpui_shell::AppAssets::new(mods::app_dir()).following_links())
+        .run(move |cx| {
+            let fonts = settings::BUNDLED_FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect();
+            if let Err(e) = cx.text_system().add_fonts(fonts) {
+                tracing::warn!("bundled fonts not loaded: {e:#}");
+            }
+            settings::note_fonts(cx.text_system().all_font_names());
+            settings::load_home_fonts(cx);
+            mods::init(cx);
+            cx.on_app_quit(|cx| {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);
+                // Where the window was, for the next start (a quit never asks the window).
+                for w in cx.windows() {
+                    if let Some(w) = w.downcast::<window::AppWindow>() {
+                        let _ = w.update(cx, |this, window, cx| {
+                            this.drain_documents(window, cx);
+                            this.close_mods_now(deadline, window, cx);
+                            place::save(window, cx);
+                        });
+                    }
+                }
+                mods::finish_shared();
+                async {}
+            })
+            .detach();
+            #[cfg(target_os = "macos")]
+            macos::init(cx);
+            if fresh {
+                let width = cx.primary_display().map(|d| f32::from(d.bounds().size.width));
+                let zoom = settings::first_zoom(width);
+                if zoom != 1.0 {
+                    let _ = settings::write_person(&settings::Person { zoom, ..Default::default() });
+                }
+            }
+            let requests = mods::install_policy();
+            if let Some(tx) = mods::request_sender() {
+                control::listen(tx);
+            }
+            match core {
+                Ok(core) => open_main(core, requests, cx),
+                Err(need) => setup::open(need, requests, cx),
+            }
+        });
+}
+
+/// The main window, on a connected core.
+pub fn open_main(core: std::sync::Arc<lbc::Core>, requests: async_channel::Receiver<mods::Request>, cx: &mut App) {
+            let (window_bounds, display_id) = place::initial(cx);
+            let options = WindowOptions {
+                window_bounds: Some(window_bounds),
+                display_id,
+                // macOS: always see-through, so a layout can draw its own title bar
+                // live; the app drags the window (window/titlebar.rs).
+                titlebar: Some(TitlebarOptions {
+                    title: Some(lumbridge::NAME.into()),
+                    // Windows: hidden for good (it can't change live); the app draws it.
+                    appears_transparent: cfg!(any(target_os = "macos", windows)),
+                    traffic_light_position: cfg!(target_os = "macos").then(|| point(px(12.0), px(7.0))),
+                }),
+                app_owns_titlebar_drag: cfg!(target_os = "macos"),
+                // Linux: open with the title bar the shipped layouts draw. Turning the
+                // system's off on the first render, while KWin maps the window, shrinks
+                // it to 20x20; turning it on later (a "system" layout) is fine.
+                window_decorations: Some(WindowDecorations::Client),
+                // Lumbridge Dev and other side-by-side builds get their own dock icon.
+                app_id: Some(std::env::var("LUMBRIDGE_APP_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| lumbridge::APP_ID.into())),
+                ..Default::default()
+            };
+            cx.open_window(options, |window, cx| cx.new(|cx| window::AppWindow::new(core, requests, window, cx)))
+                .expect("cannot open the Lumbridge window");
+            cx.activate(true);
+}

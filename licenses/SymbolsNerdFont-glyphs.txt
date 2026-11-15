@@ -1,0 +1,19 @@
+Symbols Nerd Font (assets/fonts/SymbolsNerdFont-Regular.ttf, Nerd Fonts 3.5.1) bundles glyphs
+from these projects. Each set keeps its own license; Nerd Fonts lists them in
+https://github.com/ryanoasis/nerd-fonts/blob/v3.5.1/license-audit.md
+
+- Codicons (Microsoft), CC BY 4.0: https://github.com/microsoft/vscode-codicons
+- Devicons, MIT: https://github.com/vorillaz/devicons
+- Font Awesome (Fonticons, Inc.), icons CC BY 4.0: https://github.com/FortAwesome/Font-Awesome
+- Font Awesome Extension, MIT: https://github.com/AndreLZGava/font-awesome-extension
+- Font Logos, Unlicense: https://github.com/Lukas-W/font-logos
+- IEC Power Symbols, MIT: https://github.com/jloughry/Unicode
+- Material Design Icons (Pictogrammers), Apache-2.0: https://github.com/Templarian/MaterialDesign
+- Seti-UI (modified), MIT: https://github.com/jesseweed/seti-ui
+- Octicons (GitHub), MIT: https://github.com/primer/octicons
+- Pomicons, SIL OFL 1.1: https://github.com/gabrielelana/pomicons
+- Powerline Extra Symbols, MIT: https://github.com/ryanoasis/powerline-extra-symbols
+- Powerline Symbols, free license: https://github.com/powerline/powerline
+- Weather Icons, SIL OFL 1.1: https://github.com/erikflowers/weather-icons
+
+The glyphs are used as they come in the font, unmodified.

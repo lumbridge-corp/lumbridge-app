@@ -1,0 +1,29 @@
+#!/bin/bash
+# Installs Lumbridge on this Linux box:
+#   ~/.local/share/lumbridge-app/lumbridge-app, ~/.local/bin/lumbridge-app, a .desktop entry and its icon.
+#   scripts/lumbridge-app-install-linux [path/to/lumbridge-app]   (default: target/release/lumbridge-app)
+set -euo pipefail
+cd "$(dirname "$0")/.."
+bin=${1:-target/release/lumbridge-app}
+[[ -x $bin ]] || { echo "no $bin" >&2; exit 1; }
+share="$HOME/.local/share/lumbridge-app"
+mkdir -p "$share" "$HOME/.local/bin" "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/512x512/apps"
+cp "$bin" "$share/lumbridge-app.new" && chmod +x "$share/lumbridge-app.new" && mv -f "$share/lumbridge-app.new" "$share/lumbridge-app"
+cp LICENSE THIRD-PARTY-NOTICES "$share/" 2>/dev/null || true
+ln -sfn "$share/lumbridge-app" "$HOME/.local/bin/lumbridge-app"
+python3 - "$HOME/.local/share/icons/hicolor/512x512/apps/lumbridge-app.png" <<'PY' 2>/dev/null || cp assets/lumbridge/lumbridge-app.png "$HOME/.local/share/icons/hicolor/512x512/apps/lumbridge-app.png"
+import sys; from PIL import Image
+Image.open("assets/lumbridge/lumbridge-app.png").resize((512, 512)).save(sys.argv[1])
+PY
+cat > "$HOME/.local/share/applications/lumbridge-app.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Lumbridge
+Comment=Terminals and coding agents on your machines
+Exec=$share/lumbridge-app
+Icon=lumbridge-app
+StartupWMClass=lumbridge-app
+Categories=Development;TerminalEmulator;
+DESKTOP
+update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+echo "Installed Lumbridge: $share/lumbridge-app (run: lumbridge-app)"
